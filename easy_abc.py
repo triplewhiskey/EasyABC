@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 program_version = '1.3.8.7'
-program_name = 'EasyABC ' + program_version
+program_name = 'EasyABC ' + program_version + ' '
 
 # Copyright (C) 2011-2014 Nils Liberg (mail: kotorinl at yahoo.co.uk)
 # Copyright (C) 2015-2021 Seymour Shlien (mail: fy733@ncf.ca), Jan Wybren de Jong (jw_de_jong at yahoo dot com)
@@ -110,6 +110,8 @@ except ImportError:
     # sys.stderr.write(traceback.format_exc())
     fluidsynth_available = False
 
+#FAU 20201228: add playback thanks to mplay for Mac
+from mplaysmfplayer import *
 from xml2abc_interface import xml_to_abc, abc_to_xml
 from midi2abc import midi_to_abc, Note, duration2abc
 from generalmidi import general_midi_instruments
@@ -935,7 +937,11 @@ def AbcToPDF(settings, abc_code, header, cache_dir, extra_params='', abcm2ps_pat
     cmd2 = [gs_path, '-sDEVICE=pdfwrite', '-sOutputFile=%s' % pdf_file, '-dBATCH', '-dNOPAUSE', ps_file]
     # [SS] 2015-04-08
     if wx.Platform == "__WXMAC__":
-        cmd2 = [gs_path, ps_file, '-o', pdf_file]
+        # [WJS] 2023-11-17 Fix for OSX Sonoma (works with ghostscript homebrew / macports)
+        if int(platform.mac_ver()[0].split('.')[0]) > 13:
+            cmd2 = [gs_path, ps_file, pdf_file] # [WJS] 2023-11-17 Fix for OSX Sonoma - no native ps2pdf
+        else:
+            cmd2 = [gs_path, ps_file, '-o', pdf_file]
     if os.path.exists(pdf_file):
         os.remove(pdf_file)
 
@@ -3454,7 +3460,7 @@ class ProgressFrame(wx.Frame):
         self.gauge = wx.Gauge(self, wx.ID_ANY, 100, (0, 0), (500, 80))
         self.Centre()
     def SetPercent(self, percent):
-        self.gauge.SetValue(percent)
+        self.gauge.SetValue(int(percent))
 
 
 class FlexibleListCtrl(wx.ListCtrl, listmix.ColumnSorterMixin, listmix.ListCtrlAutoWidthMixin):
@@ -3885,6 +3891,16 @@ class SearchFilesThread(threading.Thread):
         _, path, pos = self.search_results[index]
         return path, pos  # character position in file
 
+# [WJS] 2023-11-22: Added to avoid the Error
+# get file encoding type
+from chardet import detect
+
+
+def get_encoding_type(file):
+    with open(file, 'rb') as f:
+        rawdata = f.read()
+    return detect(rawdata)['encoding']
+# [WJS]end
 
 class MainFrame(wx.Frame):
     def __init__(self, parent, ID, app_dir, settings, options):
@@ -3960,10 +3976,24 @@ class MainFrame(wx.Frame):
 
         if platform.system() == 'Windows':
             default_soundfont_path = os.environ.get('HOMEPATH', 'C:') + "\\SoundFonts\\FluidR3_GM.sf2"
+        # [WJS] 2023-11-20 Defaultpath for FLuidR2_GM.sf2 in MacOS
         else:
-            default_soundfont_path = '/usr/share/sounds/sf2/FluidR3_GM.sf2'
+            if wx.Platform == "__WXMAC__":
+                default_soundfont_path = '/Library/Audio/Sounds/Banks/FluidR3_GM.sf2'
+            else:
+                default_soundfont_path = '/usr/share/sounds/sf2/FluidR3_GM.sf2'
 
         soundfont_path = settings.get('soundfont_path', default_soundfont_path)
+
+        '''FAU: Add mplay as midi player for MAC'''
+        if wx.Platform == "__WXMAC__" and self.mc is None:
+            try:
+                self.mc = MPlaySMFPlayer(self)
+                #fluidsynth_available = False
+            except:
+                print("Assign Midi Player: SMF Player seems not available")
+                self.mc = None
+
         self.uses_fluidsynth = False
         if fluidsynth_available and soundfont_path and os.path.exists(soundfont_path):
             try:
@@ -3982,7 +4012,8 @@ class MainFrame(wx.Frame):
                 backend = None
                 from wxmediaplayer import WxMediaPlayer
                 if wx.Platform == "__WXMAC__":
-                    backend = wx.media.MEDIABACKEND_QUICKTIME
+                    #backend = wx.media.MEDIABACKEND_QUICKTIME
+                    pass
                 elif wx.Platform == "__WXMSW__":
                     if platform.release() == 'XP':
                         backend = wx.media.MEDIABACKEND_DIRECTSHOW
@@ -4121,7 +4152,9 @@ class MainFrame(wx.Frame):
 
         self.play_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self.OnPlayTimer, self.play_timer)
-        self.play_timer.Start(50)
+        # [WJS] 2023-11-20 Decide, whether next line to be commented out?
+        if wx.Platform != "__WXMAC__":
+            self.play_timer.Start(50)
         self.music_update_thread.start()
         self.update_multi_tunes_menu_items()
 
@@ -4476,6 +4509,9 @@ class MainFrame(wx.Frame):
 
     def stop_playing(self):
         self.mc.Stop()
+        #FAU 20201228: play timer can be stopped no need to update progress slider +2 lines
+        self.play_timer.Stop()
+        self.mc.Load('NONEXISTANT_FILE____.mid') # be sure the midi file is released 2014-10-25 [SS]
         self.play_button.SetBitmap(self.play_bitmap)
         self.play_button.Refresh()
         self.progress_slider.SetValue(0)
@@ -4544,6 +4580,13 @@ class MainFrame(wx.Frame):
 
     def do_load_media_file(self, path):
         if self.mc.Load(path):
+            #FAU 20201228: added support for playback for Mac with SMF player
+            if wx.Platform == "__WXMAC__" or (wx.Platform == "__WXMSW__" and platform.release() != 'XP'):
+                # 1.3.6.3 [JWDJ] 2015-3 It seems mc.Play() triggers the OnMediaLoaded event
+                self.mc.Play() # does not start playing but triggers OnMediaLoaded event
+                #FAU 20201228: Start timer to be able to have progress bar updated
+                self.play_timer.Start(20)
+                self.play_button.SetBitmap(self.pause_bitmap)
             if wx.Platform == "__WXMSW__" and platform.release() != 'XP':
                 # 1.3.6.3 [JWDJ] 2015-3 It seems mc.Play() triggers the OnMediaLoaded event
                 self.mc.Play() # does not start playing but triggers OnMediaLoaded event
@@ -4561,9 +4604,9 @@ class MainFrame(wx.Frame):
             self.progress_slider.SetValue(0)
             self.OnBpmSlider(None)
             self.update_playback_rate()
-            if wx.Platform == "__WXMAC__":
-                self.mc.Seek(0)  # When using wx.media.MEDIABACKEND_QUICKTIME the music starts playing too early (when loading a file)
-                time.sleep(0.5)  # hopefully this fixes the first notes not being played
+            #if wx.Platform == "__WXMAC__":
+            #    self.mc.Seek(0)  # When using wx.media.MEDIABACKEND_QUICKTIME the music starts playing too early (when loading a file)
+            #    time.sleep(0.5)  # hopefully this fixes the first notes not being played
             self.play()
         wx.CallAfter(play)
 
@@ -4605,7 +4648,13 @@ class MainFrame(wx.Frame):
             self.OnAfterStop()
 
     def OnSeek(self, evt):
-        self.mc.Seek(self.progress_slider.GetValue())
+        if wx.Platform != "__WXMAC__": #FAU 20201229: Odd behavior and not possible to change for now on Mac
+        #print("SliderChange:" + str(self.progress_slider.GetValue()))
+            self.mc.pause()
+            self.mc.Seek(self.progress_slider.GetValue())
+            self.mc.play()
+        else:
+            self.mc.Seek(self.progress_slider.GetValue())
 
     def OnZoomSlider(self, evt):
         old_factor = self.zoom_factor
@@ -4625,6 +4674,14 @@ class MainFrame(wx.Frame):
         if not self.is_closed:
             if self.mc.is_playing:
                 self.started_playing = True
+
+                if wx.Platform == "__WXMAC__": #FAU 20201229: Used to give the hand to MIDI player
+                    delta = self.mc.IdlePlay()
+                    if delta == 0:
+                        if self.loop_midi_playback:
+                            self.mc.Seek(0)
+                        else:
+                            self.stop_playing()
 
                 offset = self.mc.Tell()
                 if offset >= self.progress_slider.Max:
@@ -4839,6 +4896,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_SLIDER, self.OnBpmSlider, self.bpm_slider)
         self.bpm_slider.Bind(wx.EVT_LEFT_DOWN, self.OnBpmSliderClick)
 
+        
         play.Bind(wx.EVT_LEFT_DOWN, self.OnToolPlay)
         play.Bind(wx.EVT_LEFT_DCLICK, self.OnToolPlayLoop)
         self.Bind(wx.EVT_BUTTON, self.OnToolStop, stop)
@@ -8030,6 +8088,7 @@ class MainFrame(wx.Frame):
         editor.SetModEventMask(wx.stc.STC_MODEVENTMASKALL & ~(wx.stc.STC_MOD_CHANGESTYLE | wx.stc.STC_PERFORMED_USER)) # [1.3.7.4] JWDJ: don't fire OnModified on style changes
         editor.Colourise(0, editor.GetLength())
 
+    
 
     def OnDropFile(self, filename):
         global execmessages, visible_abc_code
@@ -8091,7 +8150,9 @@ class MainFrame(wx.Frame):
             elif extension in ('.abc', '.txt', '.mcm', ''):
                 self.editor.BeginUndoAction()
                 self.editor.AddText('\n\n')
-                self.editor.AddText(open(filename, 'r').read().strip())
+                # [WJS] 2023-11-22 To avoid the error UnicodeDecodeError on Macos when dropping a file.
+                self.editor.AddText(open(filename, 'r', encoding = get_encoding_type(filename), errors='ignore').read().strip())
+                #self.editor.AddText(open(filename, 'r').read().strip())
                 self.editor.AddText('\n\n')
                 self.editor.EndUndoAction()
                 return True
